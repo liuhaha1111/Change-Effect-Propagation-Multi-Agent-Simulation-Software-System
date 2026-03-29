@@ -1,0 +1,30 @@
+[
+  {
+    "id": "import_comp_01",
+    "name": "Risk Heatmap Sync",
+    "type": "analysis",
+    "desc": "Builds a risk heatmap snapshot for affected agents after a change event.",
+    "params": ["changeSource", "impactLevel", "timeWindow"]
+  },
+  {
+    "id": "import_comp_02",
+    "name": "BOM Diff Broadcast",
+    "type": "communication",
+    "desc": "Broadcasts BOM delta details to downstream agents that subscribe to version changes.",
+    "params": ["bomId", "versionFrom", "versionTo"]
+  },
+  {
+    "id": "import_comp_03",
+    "name": "Constraint Repair Suggestion",
+    "type": "decision",
+    "desc": "Suggests a repair path when design and supply constraints conflict.",
+    "params": ["conflictType", "priority", "ownerAgent"]
+  },
+  {
+    "id": "import_comp_04",
+    "name": "Propagation Trace Export",
+    "type": "monitoring",
+    "desc": "Exports the current propagation trace for replay, audit, and simulation review.",
+    "params": ["traceId", "logLevel"]
+  }
+]
