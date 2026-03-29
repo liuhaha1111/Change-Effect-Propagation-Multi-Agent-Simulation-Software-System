@@ -1,30 +1,35 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useAppContext } from '../AppContext';
 import { Play, Download, Activity } from 'lucide-react';
+import type { Agent, AgentCategory } from '../types';
+import {
+  buildInitialSimulationEvents,
+  buildTriggerOptions,
+  formatRuleCondition,
+} from './simulationLogic';
 
 export function Simulation() {
   const { agents, commLinks } = useAppContext();
-  
-  const agentList: string[] = [];
-  const agentRulesMap: Record<string, string> = {};
-  Object.values(agents).forEach((cat: any) => {
-    Object.values(cat.children).forEach((agent: any) => {
-      agentList.push(agent.name);
-      // Just grab first rule description for logging
-      agentRulesMap[agent.name] = agent.rules.length > 0 
-        ? `IF ${agent.rules[0].condition.field} ${agent.rules[0].condition.operator} ${agent.rules[0].condition.value} THEN ...`
-        : "默认传播";
-    });
-  });
+
+  const allAgents: Agent[] = (Object.values(agents) as AgentCategory[]).flatMap((category) =>
+    Object.values(category.children),
+  );
+  const agentList = allAgents.map((agent) => agent.name);
+  const agentMap = Object.fromEntries(allAgents.map((agent) => [agent.name, agent])) as Record<string, Agent>;
 
   const [triggerAgent, setTriggerAgent] = useState(agentList[0] || '');
-  const [triggerEvent, setTriggerEvent] = useState('结构强度参数变更');
+  const [selectedRuleId, setSelectedRuleId] = useState('');
   const [logs, setLogs] = useState<{msg: string, type: string, time: string}[]>([
     { msg: "[系统] 就绪，选择起始智能体并运行仿真。", type: "info", time: new Date().toLocaleTimeString() }
   ]);
   
   const [affectedNodes, setAffectedNodes] = useState<Set<string>>(new Set());
   const [propagationEdges, setPropagationEdges] = useState<{from: string, to: string}[]>([]);
+
+  const selectedAgent = agentMap[triggerAgent] ?? null;
+  const triggerOptions = buildTriggerOptions(selectedAgent);
+  const selectedRule = selectedAgent?.rules.find((rule) => rule.id === selectedRuleId) ?? selectedAgent?.rules[0] ?? null;
+  const canRun = Boolean(selectedAgent && selectedRule);
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const logEndRef = useRef<HTMLDivElement>(null);
@@ -125,6 +130,22 @@ export function Simulation() {
   }, [affectedNodes, propagationEdges, commLinks]);
 
   useEffect(() => {
+    if (agentList.length === 0) return;
+    if (!agentMap[triggerAgent]) {
+      setTriggerAgent(agentList[0]);
+    }
+  }, [agentList, agentMap, triggerAgent]);
+
+  useEffect(() => {
+    const firstRuleId = selectedAgent?.rules[0]?.id ?? '';
+    const hasSelectedRule = selectedAgent?.rules.some((rule) => rule.id === selectedRuleId) ?? false;
+
+    if (!hasSelectedRule && selectedRuleId !== firstRuleId) {
+      setSelectedRuleId(firstRuleId);
+    }
+  }, [selectedAgent, selectedRuleId]);
+
+  useEffect(() => {
     logEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [logs]);
 
@@ -133,23 +154,26 @@ export function Simulation() {
   };
 
   const runSim = async () => {
-    if (!triggerAgent) return;
+    if (!selectedAgent || !selectedRule) return;
     
     setAffectedNodes(new Set());
     setPropagationEdges([]);
     setLogs([]);
-    
-    addLog(`🚀 仿真启动 | 起始智能体: ${triggerAgent} | 触发事件: "${triggerEvent}"`, 'sys');
+
+    const ruleSummary = formatRuleCondition(selectedRule);
+    const initialEvents = buildInitialSimulationEvents(selectedAgent, selectedRule, allAgents, commLinks);
+
+    addLog(`🚀 仿真启动 | 起始智能体: ${triggerAgent} | 触发事件: "${ruleSummary}"`, 'sys');
 
     const visited = new Set<string>();
-    const queue = [{ agent: triggerAgent, sourceEvent: triggerEvent, depth: 0, from: null as string | null }];
+    const queue = [{ agent: triggerAgent, depth: 0, from: null as string | null, reason: ruleSummary }];
     const newAffected = new Set<string>();
     const newEdges: {from: string, to: string}[] = [];
 
     // Simulate async propagation for visual effect
     const processQueue = async () => {
       while (queue.length > 0) {
-        const { agent, sourceEvent, depth, from } = queue.shift()!;
+        const { agent, depth, from, reason } = queue.shift()!;
         
         if (visited.has(agent)) continue;
         visited.add(agent);
@@ -162,15 +186,38 @@ export function Simulation() {
           setPropagationEdges([...newEdges]);
         }
 
-        addLog(`📍 [深度${depth}] 智能体「${agent}」受到影响，执行规则: ${agentRulesMap[agent]}`, 'effect');
+        if (depth === 0) {
+          addLog(`📍 [深度${depth}] 智能体「${agent}」命中规则：${ruleSummary}`, 'effect');
+        } else {
+          addLog(`📍 [深度${depth}] 智能体「${agent}」接收传播，原因：${reason}`, 'effect');
+        }
         
         await new Promise(r => setTimeout(r, 800)); // Visual delay
 
+        if (depth === 0) {
+          initialEvents.logs.forEach((entry) => addLog(`   ${entry.msg}`, entry.type));
+
+          if (initialEvents.nextAgents.length === 0) {
+            addLog(`⚠️ 本次事件未触发跨智能体传播。`, 'warn');
+          } else {
+            for (const nextAgent of initialEvents.nextAgents) {
+              addLog(`   ➡️ 事件传播 → 通知 ${nextAgent.agent}（${nextAgent.reason}）`, 'info');
+              queue.push({ agent: nextAgent.agent, depth: depth + 1, from: agent, reason: nextAgent.reason });
+            }
+          }
+
+          continue;
+        }
+
         const outgoing = commLinks.filter(l => l.src === agent);
+        if (outgoing.length === 0) {
+          addLog(`   ℹ️ 智能体「${agent}」没有继续向外传播。`, 'info');
+        }
+
         for (const link of outgoing) {
           if (!visited.has(link.dst)) {
-            addLog(`   ➡️ 通信触发 → 通知 ${link.dst} (${link.status})`, 'info');
-            queue.push({ agent: link.dst, sourceEvent: `经由${agent}传播: ${sourceEvent}`, depth: depth + 1, from: agent });
+            addLog(`   ➡️ 通信传播 → 通知 ${link.dst} (${link.status})`, 'info');
+            queue.push({ agent: link.dst, depth: depth + 1, from: agent, reason: `经由${agent}传播` });
           }
         }
       }
@@ -214,9 +261,28 @@ export function Simulation() {
           </div>
           <div className="flex items-center gap-2">
             <label className="text-sm font-medium text-slate-700">触发事件</label>
-            <input type="text" value={triggerEvent} onChange={e => setTriggerEvent(e.target.value)} placeholder="触发条件描述" className="px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none w-64" />
+            <select
+              value={selectedRule?.id ?? ''}
+              onChange={e => setSelectedRuleId(e.target.value)}
+              disabled={triggerOptions.length === 0}
+              className="px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none w-64 disabled:bg-slate-100 disabled:text-slate-400 disabled:cursor-not-allowed"
+            >
+              {triggerOptions.length === 0 ? (
+                <option value="">暂无可选事件</option>
+              ) : (
+                triggerOptions.map((option) => (
+                  <option key={option.ruleId} value={option.ruleId}>
+                    {option.label}
+                  </option>
+                ))
+              )}
+            </select>
           </div>
-          <button onClick={runSim} className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 transition-colors">
+          <button
+            onClick={runSim}
+            disabled={!canRun}
+            className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 transition-colors disabled:bg-slate-300 disabled:hover:bg-slate-300 disabled:cursor-not-allowed"
+          >
             <Play className="w-4 h-4" /> 运行仿真
           </button>
         </div>
@@ -224,6 +290,12 @@ export function Simulation() {
           <Download className="w-4 h-4" /> 导出配置
         </button>
       </div>
+
+      {!canRun && (
+        <div className="bg-amber-50 border border-amber-200 text-amber-800 px-4 py-3 rounded-xl text-sm">
+          当前触发智能体暂无可选触发事件，请先在规则配置中为该智能体添加规则。
+        </div>
+      )}
 
       <div className="flex flex-col lg:flex-row gap-6 h-[600px]">
         {/* Topology Panel */}
